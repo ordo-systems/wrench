@@ -1,0 +1,84 @@
+# Wrench configuration. Edit for review; never put actual secrets in the repository.
+# Monetary limits are illustrative PILOT values, not production approval.
+# Token limits come from the OpenRouter model catalog, not from this file.
+
+# Models: name -> upstream OpenRouter ID. Omitted reasoning_effort sends no reasoning parameter.
+models:
+  opus-5.5:
+    upstream_id: anthropic/claude-opus-5.5
+    reasoning_effort: low
+  glm-5.3:
+    upstream_id: z-ai/glm-5.3
+    reasoning_effort: low
+  glm-5.3-flash:
+    upstream_id: z-ai/glm-5.3-flash
+    reasoning_effort: low
+  qwen3-coder:
+    upstream_id: qwen/qwen3-coder
+  deepseek-v4-flash:
+    upstream_id: deepseek/deepseek-v4-flash
+    reasoning_effort: none
+
+# Installation-wide budget and the usage thresholds that warn users and raise alerts.
+budget:
+  currency: USD
+  timezone: UTC
+  global_limits:
+    5_hours: 8.00
+    day: 16.00
+    week: 80.00
+    month: 200.00
+    warn_at_percent:
+      - 80
+      - 95
+
+# Tiers: each user's budget and the models they may use. Exactly one tier is the default.
+tiers:
+  basic:
+    default: true
+    budget:
+      5_hours: 0.50
+      day: 1.00
+      week: 5.00
+      month: 20.00
+    models:
+      - name: glm-5.3
+        default: true
+      - name: glm-5.3-flash
+      - name: qwen3-coder
+      - name: deepseek-v4-flash
+  premium:
+    budget:
+      5_hours: 1.00
+      day: 5.00
+      week: 15.00
+      month: 50.00
+    models:
+      - name: opus-5.5
+        default: true
+      - name: glm-5.3
+      - name: glm-5.3-flash
+      - name: qwen3-coder
+      - name: deepseek-v4-flash
+
+# Allowlist, matched by verified OIDC email. Omitted role means user; omitted tier means the default tier.
+users:
+  - email: user1@example.com
+  - email: user2@example.com
+    role: user
+  - email: user3@example.com
+    role: admin
+  - email: user4@example.com
+    tier: premium
+
+# Alerts. Budget alerts follow budget.global_limits.warn_at_percent and exhaustion. The webhook URL is
+# WRENCH_ALERT_WEBHOOK_URL. Omit the section to disable alerts, or a subsection to disable one alert.
+alerts:
+  window: 15m # recent period for error-rate and latency checks
+  repeat_after: 1h # one notification per continuing incident per period
+  low_balance:
+    threshold: 5.00 # USD
+  api_errors:
+    threshold: 20 # percent of finished requests
+  llm_first_token:
+    threshold_p95: 30s

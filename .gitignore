@@ -1,0 +1,9 @@
+docs-reports/
+bin/
+target/
+node_modules/
+internal/web/dist/*
+!internal/web/dist/.gitkeep
+deploy/*/.env
+deploy/production/config/config.yaml
+.metrics/

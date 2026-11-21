@@ -1,0 +1,80 @@
+# Local environment: PostgreSQL and Wrench over plain HTTP on 127.0.0.1:8080, with the real GitLab and
+# OpenRouter. No TLS, no Caddy and no backup: for trying Wrench on one machine or a closed network. Secrets live in
+# .env next to this file (copy env.example; .env is ignored by Git); the configuration lives in config/, the only
+# directory mounted into Wrench, and edits there apply without a restart. From this directory:
+#   docker compose up -d --build --wait
+name: wrench-local
+
+services:
+  postgres:
+    image: postgres:17-alpine@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: ${POSTGRES_DB:?}
+    volumes:
+      - ./data/pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  wrench:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${WRENCH_BUILD_VERSION:-dev}
+        COMMIT: ${WRENCH_BUILD_COMMIT:-unknown}
+    image: wrench:${WRENCH_VERSION:-local}
+    restart: unless-stopped
+    environment:
+      WRENCH_LISTEN_ADDR: 0.0.0.0:8080
+      WRENCH_PUBLIC_URL: ${WRENCH_PUBLIC_URL:?}
+      WRENCH_HTTP_ONLY: "true"
+      WRENCH_WEB_SESSION_TTL: ${WRENCH_WEB_SESSION_TTL:?}
+      WRENCH_CLIENT_KEYS_TTL: ${WRENCH_CLIENT_KEYS_TTL:?}
+      WRENCH_POSTGRES_DSN: ${WRENCH_POSTGRES_DSN:?}
+      WRENCH_GITLAB_URL: ${WRENCH_GITLAB_URL:?}
+      WRENCH_GITLAB_CLIENT_ID: ${WRENCH_GITLAB_CLIENT_ID:?}
+      WRENCH_GITLAB_CLIENT_SECRET: ${WRENCH_GITLAB_CLIENT_SECRET:?}
+      WRENCH_GITLAB_SYNC_TOKEN: ${WRENCH_GITLAB_SYNC_TOKEN:?}
+      WRENCH_GITLAB_SYNC_INTERVAL: ${WRENCH_GITLAB_SYNC_INTERVAL:?}
+      WRENCH_OPENROUTER_URL: ${WRENCH_OPENROUTER_URL:-https://openrouter.ai/api/v1}
+      WRENCH_OPENROUTER_KEY: ${WRENCH_OPENROUTER_KEY:?}
+      WRENCH_UPSTREAM_TIMEOUT_CONNECT: ${WRENCH_UPSTREAM_TIMEOUT_CONNECT:?}
+      WRENCH_UPSTREAM_TIMEOUT_FIRST_TOKEN: ${WRENCH_UPSTREAM_TIMEOUT_FIRST_TOKEN:?}
+      WRENCH_UPSTREAM_TIMEOUT_STREAM_IDLE: ${WRENCH_UPSTREAM_TIMEOUT_STREAM_IDLE:?}
+      WRENCH_UPSTREAM_TIMEOUT_TOTAL: ${WRENCH_UPSTREAM_TIMEOUT_TOTAL:?}
+      WRENCH_UPSTREAM_CONCURRENCY_PER_USER: ${WRENCH_UPSTREAM_CONCURRENCY_PER_USER:?}
+      WRENCH_UPSTREAM_CONCURRENCY_GLOBAL: ${WRENCH_UPSTREAM_CONCURRENCY_GLOBAL:?}
+      WRENCH_SESSION_OFFLINE_AFTER: ${WRENCH_SESSION_OFFLINE_AFTER:?}
+      WRENCH_ALERT_WEBHOOK_URL: ${WRENCH_ALERT_WEBHOOK_URL:-}
+      WRENCH_LOG_LEVEL: ${WRENCH_LOG_LEVEL:-info}
+      WRENCH_ORG_NAME: ${WRENCH_ORG_NAME:-}
+      WRENCH_CONFIG: /etc/wrench/config.yaml
+    volumes:
+      - ./config:/etc/wrench:ro
+    ports:
+      - 127.0.0.1:8080:8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/wrench", "healthcheck", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

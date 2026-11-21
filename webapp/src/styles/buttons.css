@@ -1,0 +1,108 @@
+/* Buttons: default is outlined; .primary fills with the accent, .danger uses the bad color. Links styled as
+   buttons take .button. Icon-only buttons (.icon) stay square. */
+button,
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.2;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    background-color 0.15s,
+    color 0.15s;
+}
+button:hover:not(:disabled),
+.button:hover {
+  border-color: var(--accent);
+}
+button:focus-visible,
+.button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button.primary,
+.button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--page);
+  font-weight: 600;
+}
+button.primary:hover:not(:disabled),
+.button.primary:hover {
+  border-color: var(--text);
+}
+
+button.danger,
+.button.danger {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+button.danger:hover:not(:disabled),
+.button.danger:hover {
+  border-color: var(--bad);
+  background: var(--bad);
+  color: var(--page);
+}
+
+button.icon,
+.button.icon {
+  aspect-ratio: 1;
+  padding: 6px;
+}
+
+/* Hidden from sight, still read by screen readers (live regions of icon-only buttons). */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* A compact button for table rows, so an action does not make its row taller than the text rows. */
+button.small {
+  padding: 2px 10px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+/* Dropdowns: the native arrow is replaced by a chevron set 10px in from the right edge, and the box matches the
+   button height so toolbars line up. */
+select {
+  appearance: none;
+  padding: 6px 32px 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")
+    no-repeat right 10px center;
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+select:hover {
+  border-color: var(--accent);
+}
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

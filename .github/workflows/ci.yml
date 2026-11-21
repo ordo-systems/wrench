@@ -1,0 +1,75 @@
+name: ci
+
+on:
+  # master and v* tags run these checks through image.yml and release.yml, which call this workflow first.
+  push:
+    branches-ignore: [master]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.19.0
+          cache: npm
+          cache-dependency-path: webapp/package-lock.json
+      - name: Workflows
+        run: make lint-workflows
+      - name: Lint, test and build
+        run: make ci
+      - name: Vulnerabilities
+        run: make vuln
+      - name: Stop test database
+        if: always()
+        run: make test-db-down
+
+  # Builds both platforms without pushing, so a broken Dockerfile fails here rather than at release.
+  image:
+    uses: ./.github/workflows/image-build.yml
+    permissions:
+      contents: read
+    with:
+      tags: type=sha
+
+  e2e:
+    runs-on: ubuntu-24.04
+    needs: checks
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: End-to-end against the demo stack
+        run: make e2e
+
+  # The real opencode against the demo stack: its Console API is private, so this catches a release that breaks it.
+  opencode:
+    runs-on: ubuntu-24.04
+    needs: checks
+    env:
+      OPENCODE_VERSION: 2.3.0
+      OPENCODE_SHA256: fc0f81522aceeabac47693d88389efa2bc517ce74c2c38fd6967819fcc6e4d3b
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Install opencode
+        run: |
+          curl -fsSL -o opencode.tar.gz "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64.tar.gz"
+          echo "${OPENCODE_SHA256}  opencode.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf opencode.tar.gz -C "$HOME/.local/bin" opencode
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: opencode contract
+        run: make opencode-contract

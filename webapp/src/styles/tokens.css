@@ -1,0 +1,62 @@
+/* Theme tokens of the dashboard: dark by default, light under data-theme="light" (theme.ts sets the attribute). */
+:root {
+  color-scheme: dark;
+  --page: #141b1c;
+  --card: #1b2425;
+  --line: #35433f;
+  --text: #e8eeeb;
+  --muted: #a8b4b0;
+  --accent: #b2eb82;
+  --ok: #b2eb82;
+  --warn: #e4ae5d;
+  --bad: #f28e8e;
+  --font: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  /* Categorical chart palette: series without a status color take these in order (Chart.vue). */
+  --chart-1: #b2eb82;
+  --chart-2: #7cc4f2;
+  --chart-3: #e4ae5d;
+  --chart-4: #c9a4f0;
+  --chart-5: #6fd6c4;
+  --chart-6: #f2a7d0;
+  --chart-7: #d6d27a;
+  --chart-8: #9fb0f5;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --page: #f6f8f4;
+  --card: #fff;
+  --line: #cdd7ce;
+  --text: #202d27;
+  --muted: #5b685f;
+  --accent: #35652b;
+  --ok: #35652b;
+  --warn: #97600b;
+  --bad: #b32c35;
+  --chart-1: #35652b;
+  --chart-2: #1f6fa8;
+  --chart-3: #97600b;
+  --chart-4: #6b3fa0;
+  --chart-5: #137a6b;
+  --chart-6: #a83a78;
+  --chart-7: #6e6a12;
+  --chart-8: #3c4fb0;
+}
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--text);
+  font-family: var(--font);
+}
+.mono {
+  font-family: var(--mono);
+}
+.card {
+  padding: 16px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.pill {
+  border-radius: 999px;
+}

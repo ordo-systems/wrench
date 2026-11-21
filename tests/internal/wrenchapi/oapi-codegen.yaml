@@ -1,0 +1,6 @@
+# Generates the Wrench API client from the server's document: make generate.
+package: wrenchapi
+output: wrenchapi.gen.go
+generate:
+  models: true
+  client: true

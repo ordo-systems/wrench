@@ -1,0 +1,7 @@
+# Image scan exceptions for `make image-scan`. Every entry names why it does not apply and expires, so the scan
+# fails again once the reason should have gone away.
+vulnerabilities:
+  # libssl3 in gcr.io/distroless/cc-debian12: Debian has the fix, the distroless image is not rebuilt yet.
+  # DTLS only; libpq (pg_dump, pg_restore) uses TLS over TCP. Bump the distroless digest when it is rebuilt.
+  - id: CVE-2026-84782
+    expired_at: 2026-12-21

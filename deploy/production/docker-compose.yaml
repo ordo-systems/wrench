@@ -1,0 +1,158 @@
+# Wrench production delivery: four containers on one node. Secrets live in .env next to this file (copy
+# env.example; the real file is ignored by Git); the configuration lives in config/ (copy config.yaml.example to
+# config/config.yaml), which is the only directory mounted into Wrench and the backup. From this directory:
+#   docker compose up -d --build
+# Third-party images are pinned by digest; wrench and backup run one image built from this checkout.
+# Each container receives only its own settings: the OpenRouter key reaches Wrench only and the S3
+# credentials and restic password reach the backup container only.
+#
+# Networks: edge connects Caddy and Wrench and has egress (GitLab, OpenRouter, alert webhook); backend is
+# internal (no internet) for Wrench, PostgreSQL and backup; egress lets backup reach S3. Only Caddy publishes ports.
+name: wrench
+
+# Every Wrench service runs the same image.
+x-wrench-build: &wrench-build
+  context: ../..
+  dockerfile: Dockerfile
+  args:
+    VERSION: ${WRENCH_BUILD_VERSION:-dev}
+    COMMIT: ${WRENCH_BUILD_COMMIT:-unknown}
+
+services:
+  caddy:
+    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    restart: unless-stopped
+    environment:
+      WRENCH_DOMAIN: ${WRENCH_DOMAIN:?set WRENCH_DOMAIN in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ../shared/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks: [edge]
+    depends_on:
+      wrench:
+        condition: service_healthy
+
+  wrench:
+    build: *wrench-build
+    image: wrench:${WRENCH_VERSION:-local}
+    restart: unless-stopped
+    environment:
+      WRENCH_LISTEN_ADDR: 0.0.0.0:8080
+      WRENCH_PUBLIC_URL: ${WRENCH_PUBLIC_URL:?}
+      WRENCH_WEB_SESSION_TTL: ${WRENCH_WEB_SESSION_TTL:?}
+      WRENCH_CLIENT_KEYS_TTL: ${WRENCH_CLIENT_KEYS_TTL:?}
+      WRENCH_POSTGRES_DSN: ${WRENCH_POSTGRES_DSN:?}
+      WRENCH_GITLAB_URL: ${WRENCH_GITLAB_URL:?}
+      WRENCH_GITLAB_CLIENT_ID: ${WRENCH_GITLAB_CLIENT_ID:?}
+      WRENCH_GITLAB_CLIENT_SECRET: ${WRENCH_GITLAB_CLIENT_SECRET:?}
+      WRENCH_GITLAB_SYNC_TOKEN: ${WRENCH_GITLAB_SYNC_TOKEN:?}
+      WRENCH_GITLAB_SYNC_INTERVAL: ${WRENCH_GITLAB_SYNC_INTERVAL:?}
+      WRENCH_OPENROUTER_URL: ${WRENCH_OPENROUTER_URL:-https://openrouter.ai/api/v1}
+      WRENCH_OPENROUTER_KEY: ${WRENCH_OPENROUTER_KEY:?}
+      WRENCH_UPSTREAM_TIMEOUT_CONNECT: ${WRENCH_UPSTREAM_TIMEOUT_CONNECT:?}
+      WRENCH_UPSTREAM_TIMEOUT_FIRST_TOKEN: ${WRENCH_UPSTREAM_TIMEOUT_FIRST_TOKEN:?}
+      WRENCH_UPSTREAM_TIMEOUT_STREAM_IDLE: ${WRENCH_UPSTREAM_TIMEOUT_STREAM_IDLE:?}
+      WRENCH_UPSTREAM_TIMEOUT_TOTAL: ${WRENCH_UPSTREAM_TIMEOUT_TOTAL:?}
+      WRENCH_UPSTREAM_CONCURRENCY_PER_USER: ${WRENCH_UPSTREAM_CONCURRENCY_PER_USER:?}
+      WRENCH_UPSTREAM_CONCURRENCY_GLOBAL: ${WRENCH_UPSTREAM_CONCURRENCY_GLOBAL:?}
+      WRENCH_SESSION_OFFLINE_AFTER: ${WRENCH_SESSION_OFFLINE_AFTER:?}
+      WRENCH_ALERT_WEBHOOK_URL: ${WRENCH_ALERT_WEBHOOK_URL:-}
+      WRENCH_LOG_LEVEL: ${WRENCH_LOG_LEVEL:-info}
+      WRENCH_ORG_NAME: ${WRENCH_ORG_NAME:-}
+      WRENCH_HTTP_ONLY: ${WRENCH_HTTP_ONLY:-false}
+      WRENCH_BACKUP_STATUS_FILE: /var/lib/wrench/backup-status/backup.json
+    volumes:
+      - ./config:/etc/wrench:ro
+      - backup_status:/var/lib/wrench/backup-status:ro
+    networks: [edge, backend]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/wrench", "healthcheck", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  postgres:
+    image: postgres:17-alpine@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: ${POSTGRES_DB:?}
+      WRENCH_BACKUP_DB_PASSWORD: ${WRENCH_BACKUP_DB_PASSWORD:?set WRENCH_BACKUP_DB_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ../shared/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  backup:
+    build: *wrench-build
+    image: wrench:${WRENCH_VERSION:-local}
+    command: ["run", "backup"]
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      WRENCH_BACKUP_POSTGRES_DSN: ${WRENCH_BACKUP_POSTGRES_DSN:?}
+      WRENCH_BACKUP_SCHEDULE: ${WRENCH_BACKUP_SCHEDULE:?}
+      WRENCH_BACKUP_RETENTION: ${WRENCH_BACKUP_RETENTION:?}
+      WRENCH_BACKUP_RESTIC_PASSWORD: ${WRENCH_BACKUP_RESTIC_PASSWORD:?set WRENCH_BACKUP_RESTIC_PASSWORD in .env}
+      WRENCH_BACKUP_S3_ENDPOINT: ${WRENCH_BACKUP_S3_ENDPOINT:?}
+      WRENCH_BACKUP_S3_BUCKET: ${WRENCH_BACKUP_S3_BUCKET:?}
+      WRENCH_BACKUP_S3_PATH: ${WRENCH_BACKUP_S3_PATH:-}
+      WRENCH_BACKUP_S3_REGION: ${WRENCH_BACKUP_S3_REGION:?}
+      WRENCH_BACKUP_S3_ACCESS_KEY: ${WRENCH_BACKUP_S3_ACCESS_KEY:?}
+      WRENCH_BACKUP_S3_SECRET_KEY: ${WRENCH_BACKUP_S3_SECRET_KEY:?}
+      WRENCH_BACKUP_HEARTBEAT_URL: ${WRENCH_BACKUP_HEARTBEAT_URL:-}
+    volumes:
+      - ./config:/etc/wrench:ro
+      - backup_repo:/var/lib/wrench-backup/restic
+      - backup_status:/var/lib/wrench-backup/status
+    networks: [backend, egress]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+networks:
+  edge: {}
+  backend:
+    internal: true
+  egress: {}
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
+  backup_repo:
+  backup_status:

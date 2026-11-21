@@ -1,0 +1,31 @@
+{
+  "name": "wrench-dashboard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "test": "vitest run",
+    "lint": "vue-tsc --noEmit && prettier --check src",
+    "format": "prettier --write src"
+  },
+  "dependencies": {
+    "echarts": "6.1.0",
+    "lucide-vue-next": "0.468.0",
+    "vue": "3.5.46",
+    "vue-echarts": "8.3.2",
+    "vue-router": "4.5.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@vitejs/plugin-vue": "5.2.1",
+    "@vue/test-utils": "2.4.6",
+    "jsdom": "26.0.0",
+    "openapi-typescript": "7.13.0",
+    "prettier": "3.4.2",
+    "typescript": "5.7.3",
+    "vite": "6.4.6",
+    "vitest": "4.1.12",
+    "vue-tsc": "2.2.4"
+  }
+}

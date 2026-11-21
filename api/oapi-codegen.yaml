@@ -1,0 +1,7 @@
+# Generates the Wrench API server interface and models from openapi.yaml: make generate.
+package: api
+output: api.gen.go
+generate:
+  models: true
+  std-http-server: true
+  strict-server: true

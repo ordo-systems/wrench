@@ -1,0 +1,8 @@
+# Public HTTPS entry point. Caddy obtains and renews the certificate for WRENCH_DOMAIN automatically;
+# ports 80 and 443 must reach this host. Responses are streamed unbuffered for server-sent events,
+# and nothing is compressed so streams are never held back.
+{$WRENCH_DOMAIN} {
+	reverse_proxy wrench:8080 {
+		flush_interval -1
+	}
+}

@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Configure — Wrench docs</title>
+    <link rel="icon" type="image/svg+xml" href="../favicon.svg" />
+    <link rel="stylesheet" href="../assets/site.css" />
+    <script src="../assets/theme.js"></script>
+  </head>
+  <body>
+    <header class="bar">
+      <a class="brand" href="../">
+        <svg class="logo" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><path d="M14.6 4.5A4.5 4.5 0 1 0 19.5 9.4M11.8 12.2 4.5 19.5" /></svg>Wrench
+      </a>
+      <nav aria-label="Site">
+        <a href="./" aria-current="page">Docs</a>
+        <a href="https://github.com/ordo-systems/wrench">GitHub</a>
+      </nav>
+      <button type="button" class="icon" data-theme-toggle aria-label="Switch theme">
+        <svg class="sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2m-7.07-17.07 1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" /></svg>
+        <svg class="moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" /></svg>
+      </button>
+    </header>
+    <div class="docs">
+      <aside>
+        <nav aria-label="Documentation">
+          <a href="./">Quick start</a>
+          <a href="deploy.html">Deploy</a>
+          <a href="configure.html" aria-current="page">Configure</a>
+          <a href="connect.html">Connect opencode</a>
+          <a href="operate.html">Operate</a>
+        </nav>
+      </aside>
+      <article>
+        <h1>Configure</h1>
+        <p class="lead">
+          Policy lives in <code>config/config.yaml</code>: models, budgets, tiers, users and alerts. Secrets and
+          runtime settings live in <code>.env</code>.
+        </p>
+
+        <h2>config.yaml</h2>
+        <pre><code>models:
+  glm-5.3:
+    upstream_id: z-ai/glm-5.3     # OpenRouter model ID
+    reasoning_effort: low         # optional
+
+budget:
+  currency: USD
+  timezone: UTC
+  global_limits:                  # shared by everyone
+    5_hours: 8.00
+    day: 16.00
+    week: 80.00
+    month: 200.00
+    warn_at_percent: [80, 95]
+
+tiers:
+  basic:
+    default: true                 # exactly one default tier
+    budget: {5_hours: 0.50, day: 1.00, week: 5.00, month: 20.00}
+    models:
+      - name: glm-5.3
+        default: true             # exactly one default model per tier
+
+users:                            # the allowlist, by verified GitLab email
+  - email: ada@example.com
+  - email: lin@example.com
+    role: admin
+    tier: basic</code></pre>
+
+        <h2>Rules</h2>
+        <ul>
+          <li>Edits apply without a restart. An invalid file is rejected whole, the old one keeps serving, and the <code>config:invalid</code> alert stays open until you fix it.</li>
+          <li>All four windows are required. <code>5_hours</code>, <code>day</code> and <code>week</code> are fixed UTC windows; <code>month</code> is the calendar month. Zero means no access, not unlimited.</li>
+          <li>Requests check the user's tier budget and the global budget together. A spent window refuses with <code>402</code> until it resets.</li>
+          <li>Removing a user refuses their next request. Administrators are bound by the same budgets.</li>
+          <li>Token limits and prices come from OpenRouter's catalog, not from this file.</li>
+        </ul>
+
+        <h2>Alerts</h2>
+        <p>
+          Add an <code>alerts</code> section for low OpenRouter credit, error rate and slow first tokens; budget alerts
+          follow <code>warn_at_percent</code>. Set <code>WRENCH_ALERT_WEBHOOK_URL</code> to a Slack or Mattermost incoming
+          webhook, or read them on the dashboard.
+        </p>
+
+        <h2>.env</h2>
+        <table>
+          <thead><tr><th>Variable</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code>WRENCH_DOMAIN</code>, <code>WRENCH_PUBLIC_URL</code></td><td>Where Wrench is served</td></tr>
+            <tr><td><code>WRENCH_GITLAB_*</code></td><td>GitLab URL, OIDC client, <code>read_api</code> token, check interval</td></tr>
+            <tr><td><code>WRENCH_OPENROUTER_KEY</code></td><td>The only upstream key; it never leaves Wrench</td></tr>
+            <tr><td><code>WRENCH_UPSTREAM_*</code></td><td>Timeouts and concurrency limits</td></tr>
+            <tr><td><code>WRENCH_BACKUP_*</code></td><td>Schedule, retention, restic password, S3</td></tr>
+          </tbody>
+        </table>
+        <p>Changes to <code>.env</code> apply on <code>docker compose up -d</code>. Missing values stop startup.</p>
+        <nav class="next" aria-label="Pages">
+          <span><a class="button" href="deploy.html">← Deploy</a></span>
+          <span><a class="button" href="connect.html">Connect opencode →</a></span>
+        </nav>
+      </article>
+    </div>
+    <footer>
+      Wrench · <a href="https://github.com/ordo-systems/wrench">github.com/ordo-systems/wrench</a> ·
+      <a href="https://github.com/ordo-systems/wrench/tree/master/docs">Full reference</a>
+    </footer>
+  </body>
+</html>

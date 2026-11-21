@@ -1,0 +1,119 @@
+# Demo environment: PostgreSQL and Wrench with the built-in OpenRouter and GitLab mocks
+# (`wrench mock llm|gitlab`) and synthetic credentials. Nothing here reaches the internet or needs a secret.
+# The end-to-end tests in tests/ run against this stack. Start it with `make demo` from the repository root,
+# which then runs the "seed" service to add 30 days of demo data; edits of config/ apply without a restart.
+# Sign in at http://localhost:18080 through the GitLab mock's account picker; scripts and the end-to-end tests
+# sign in the same way (tests/login).
+name: wrench-demo
+
+# Every Wrench service runs the same image.
+x-wrench-build: &wrench-build
+  context: ../..
+  dockerfile: Dockerfile
+  args:
+    VERSION: ${WRENCH_BUILD_VERSION:-dev}
+    COMMIT: ${WRENCH_BUILD_COMMIT:-unknown}
+
+# The GitLab OAuth application, shared by the mock and Wrench.
+x-gitlab-app: &gitlab-app
+  WRENCH_GITLAB_CLIENT_ID: demo
+  WRENCH_GITLAB_CLIENT_SECRET: demo
+  WRENCH_GITLAB_SYNC_TOKEN: demo
+
+x-wrench-config: &wrench-config
+  - ./config:/etc/wrench:ro
+
+services:
+  postgres:
+    image: postgres:17-alpine@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac
+    environment:
+      POSTGRES_USER: wrench
+      POSTGRES_PASSWORD: wrench
+      POSTGRES_DB: wrench
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "wrench"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  openrouter:
+    build: *wrench-build
+    command: ["mock", "llm"]
+    ports:
+      - 127.0.0.1:18000:8000
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/wrench", "healthcheck", "http://127.0.0.1:8000/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  gitlab:
+    build: *wrench-build
+    command: ["mock", "gitlab", "--issuer", "http://gitlab:9000", "--public-url", "http://localhost:19000"]
+    environment: *gitlab-app
+    volumes: *wrench-config
+    ports:
+      - 127.0.0.1:19000:9000
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/wrench", "healthcheck", "http://127.0.0.1:9000/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  wrench:
+    build: *wrench-build
+    environment:
+      <<: *gitlab-app
+      WRENCH_LISTEN_ADDR: 0.0.0.0:8080
+      WRENCH_PUBLIC_URL: http://localhost:18080
+      WRENCH_WEB_SESSION_TTL: 12h
+      WRENCH_CLIENT_KEYS_TTL: 168h
+      WRENCH_POSTGRES_DSN: postgres://wrench:wrench@postgres:5432/wrench?sslmode=disable
+      WRENCH_GITLAB_URL: http://gitlab:9000
+      WRENCH_GITLAB_SYNC_INTERVAL: 5m
+      WRENCH_OPENROUTER_URL: http://openrouter:8000/api/v1
+      WRENCH_OPENROUTER_KEY: demo-openrouter-key
+      WRENCH_UPSTREAM_TIMEOUT_CONNECT: 10s
+      WRENCH_UPSTREAM_TIMEOUT_FIRST_TOKEN: 30s
+      WRENCH_UPSTREAM_TIMEOUT_STREAM_IDLE: 30s
+      WRENCH_UPSTREAM_TIMEOUT_TOTAL: 2m
+      WRENCH_UPSTREAM_CONCURRENCY_PER_USER: "3"
+      WRENCH_UPSTREAM_CONCURRENCY_GLOBAL: "60"
+      WRENCH_SESSION_OFFLINE_AFTER: 60s
+      WRENCH_LOG_LEVEL: debug
+      WRENCH_HTTP_ONLY: "true"
+    volumes: *wrench-config
+    ports:
+      - 127.0.0.1:18080:8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gitlab:
+        condition: service_healthy
+      openrouter:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/wrench", "healthcheck", "http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # Fills an empty database with demo history once Wrench has created the schema; a no-op on later starts.
+  seed:
+    build: *wrench-build
+    command: ["mock", "seed"]
+    profiles: ["seed"]
+    restart: "no"
+    environment:
+      # The issuer a real sign-in through the GitLab mock binds to; seeded users share it.
+      WRENCH_GITLAB_URL: http://gitlab:9000
+      WRENCH_POSTGRES_DSN: postgres://wrench:wrench@postgres:5432/wrench?sslmode=disable
+    volumes: *wrench-config
+    depends_on:
+      wrench:
+        condition: service_healthy
+
+volumes:
+  pgdata:

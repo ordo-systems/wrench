@@ -1,0 +1,63 @@
+# A pushed tag vX.Y.Z[-suffix] runs the checks, publishes the image with its version tags and creates a draft
+# GitHub Release for a person to publish. Release runs are never cancelled.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  meta:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+      image_tags: ${{ steps.tag.outputs.image_tags }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Classify the tag
+        id: tag
+        run: sh .github/scripts/release-tag.sh "$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+
+  ci:
+    needs: meta
+    uses: ./.github/workflows/ci.yml
+
+  image:
+    needs: [meta, ci]
+    uses: ./.github/workflows/image-build.yml
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    with:
+      push: true
+      version: ${{ needs.meta.outputs.version }}
+      tags: ${{ needs.meta.outputs.image_tags }}
+
+  release:
+    needs: [meta, image]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+          IMAGE: ${{ needs.image.outputs.image }}
+        run: |
+          notes=$(cat <<NOTES
+          Image: \`${IMAGE}:${VERSION}\` (linux/amd64, linux/arm64)
+          NOTES
+          )
+          flags=""
+          if [ "$PRERELEASE" = true ]; then flags="--prerelease"; fi
+          # shellcheck disable=SC2086 # flags is empty or one word
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --generate-notes \
+            --title "Wrench $VERSION" --notes "$notes" $flags

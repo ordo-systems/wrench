@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Operate — Wrench docs</title>
+    <link rel="icon" type="image/svg+xml" href="../favicon.svg" />
+    <link rel="stylesheet" href="../assets/site.css" />
+    <script src="../assets/theme.js"></script>
+  </head>
+  <body>
+    <header class="bar">
+      <a class="brand" href="../">
+        <svg class="logo" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><path d="M14.6 4.5A4.5 4.5 0 1 0 19.5 9.4M11.8 12.2 4.5 19.5" /></svg>Wrench
+      </a>
+      <nav aria-label="Site">
+        <a href="./" aria-current="page">Docs</a>
+        <a href="https://github.com/ordo-systems/wrench">GitHub</a>
+      </nav>
+      <button type="button" class="icon" data-theme-toggle aria-label="Switch theme">
+        <svg class="sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2m-7.07-17.07 1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" /></svg>
+        <svg class="moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" /></svg>
+      </button>
+    </header>
+    <div class="docs">
+      <aside>
+        <nav aria-label="Documentation">
+          <a href="./">Quick start</a>
+          <a href="deploy.html">Deploy</a>
+          <a href="configure.html">Configure</a>
+          <a href="connect.html">Connect opencode</a>
+          <a href="operate.html" aria-current="page">Operate</a>
+        </nav>
+      </aside>
+      <article>
+        <h1>Operate</h1>
+        <p class="lead">Backups, updates, restore and monitoring. Commands run in <code>/opt/wrench</code> on the node.</p>
+
+        <h2>Backups</h2>
+        <p>
+          The backup container dumps the database and <code>config/</code> on its schedule (cron, UTC) into a local
+          (<code>data/backup/restic</code>) and an S3 restic repository, both encrypted. Old snapshots are pruned only after a successful run. The
+          dashboard and alerts report a failed or missing backup; <code>WRENCH_BACKUP_HEARTBEAT_URL</code> gets a
+          ping after each one.
+        </p>
+
+        <h2>Update</h2>
+        <pre><code>docker compose exec backup wrench backup
+# set WRENCH_VERSION in .env to the new release
+docker compose pull &amp;&amp; docker compose up -d</code></pre>
+        <p>
+          Migrations run at start and are not reversible. To roll back a release that changed the schema, restore
+          the backup taken before the update with the previous version.
+        </p>
+
+        <h2>Restore</h2>
+        <p>On a clean node with <code>compose.yaml</code>, <code>.env</code>, <code>Caddyfile</code>, <code>initdb/</code>, the restic password and an empty <code>data/</code> prepared as in <a href="deploy.html#start">Deploy</a>:</p>
+        <pre><code>docker compose up -d postgres
+docker compose run --rm backup restore --from s3 latest
+docker compose up -d</code></pre>
+        <p>
+          The restore needs the database owner, so point the backup at it for that run: add
+          <code>-e WRENCH_BACKUP_POSTGRES_DSN=postgres://wrench:&lt;POSTGRES_PASSWORD&gt;@postgres:5432/wrench?sslmode=disable</code>
+          after <code>--rm</code>. Start Wrench only after the restore.
+        </p>
+
+        <h2>Monitor</h2>
+        <ul>
+          <li>The dashboard's top bar shows whether requests run, and why they are paused.</li>
+          <li>Administrators see system status, every user's usage and open alerts.</li>
+          <li>Watch <code>/healthz</code> from outside the node, and use a dead-man check for the backup heartbeat.</li>
+        </ul>
+        <nav class="next" aria-label="Pages">
+          <span><a class="button" href="connect.html">← Connect opencode</a></span>
+          <span></span>
+        </nav>
+      </article>
+    </div>
+    <footer>
+      Wrench · <a href="https://github.com/ordo-systems/wrench">github.com/ordo-systems/wrench</a> ·
+      <a href="https://github.com/ordo-systems/wrench/tree/master/docs">Full reference</a>
+    </footer>
+  </body>
+</html>

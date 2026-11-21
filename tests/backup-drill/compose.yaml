@@ -1,0 +1,127 @@
+# Restore drill: PostgreSQL, Wrench, the backup container and SeaweedFS as a stand-in S3.
+# Used only by `make backup-drill`; synthetic credentials, no internet access needed.
+name: wrench-drill
+
+# Every Wrench service runs the same image.
+x-wrench-build: &wrench-build
+  context: ../..
+  dockerfile: Dockerfile
+  args:
+    VERSION: ${WRENCH_BUILD_VERSION:-dev}
+    COMMIT: ${WRENCH_BUILD_COMMIT:-unknown}
+
+# The GitLab OAuth application, shared by the mock and Wrench.
+x-gitlab-app: &gitlab-app
+  WRENCH_GITLAB_CLIENT_ID: drill
+  WRENCH_GITLAB_CLIENT_SECRET: drill
+  WRENCH_GITLAB_SYNC_TOKEN: drill
+
+services:
+  # Sign-in for the drill's API calls (tests/cmd/wrench-login).
+  gitlab:
+    build: *wrench-build
+    command: ["mock", "gitlab", "--issuer", "http://gitlab:9000", "--public-url", "http://localhost:19085"]
+    environment: *gitlab-app
+    volumes:
+      - ../../deploy/shared/config/config.yaml:/etc/wrench/config.yaml:ro
+    ports:
+      - 127.0.0.1:19085:9000
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/wrench", "healthcheck", "http://127.0.0.1:9000/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  s3:
+    image: chrislusf/seaweedfs:4.53@sha256:ccad23e18639c8b98cee17e7100b95830a06077b56d8e5b006d6dcf8ec5e94a0
+    command: ["server", "-s3", "-dir=/data", "-ip.bind=0.0.0.0"]
+    volumes:
+      - s3data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8333/status"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+  postgres:
+    image: postgres:17-alpine@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac
+    environment:
+      POSTGRES_USER: wrench
+      POSTGRES_PASSWORD: drill-owner
+      POSTGRES_DB: wrench
+      WRENCH_BACKUP_DB_PASSWORD: drill-backup
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ../../deploy/shared/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "wrench"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  wrench:
+    build: *wrench-build
+    environment:
+      WRENCH_LISTEN_ADDR: 0.0.0.0:8080
+      WRENCH_PUBLIC_URL: http://localhost:18085
+      WRENCH_WEB_SESSION_TTL: 12h
+      WRENCH_CLIENT_KEYS_TTL: 168h
+      WRENCH_POSTGRES_DSN: postgres://wrench:drill-owner@postgres:5432/wrench?sslmode=disable
+      <<: *gitlab-app
+      WRENCH_GITLAB_URL: http://gitlab:9000
+      WRENCH_GITLAB_SYNC_INTERVAL: 5m
+      WRENCH_OPENROUTER_URL: http://127.0.0.1:1/api/v1
+      WRENCH_OPENROUTER_KEY: drill
+      WRENCH_UPSTREAM_TIMEOUT_CONNECT: 1s
+      WRENCH_UPSTREAM_TIMEOUT_FIRST_TOKEN: 30s
+      WRENCH_UPSTREAM_TIMEOUT_STREAM_IDLE: 30s
+      WRENCH_UPSTREAM_TIMEOUT_TOTAL: 2m
+      WRENCH_UPSTREAM_CONCURRENCY_PER_USER: "3"
+      WRENCH_UPSTREAM_CONCURRENCY_GLOBAL: "60"
+      WRENCH_SESSION_OFFLINE_AFTER: 60s
+      WRENCH_LOG_LEVEL: warn
+      WRENCH_BACKUP_STATUS_FILE: /var/lib/wrench/backup-status/backup.json
+    volumes:
+      - backup_status:/var/lib/wrench/backup-status:ro
+    ports:
+      - 127.0.0.1:18085:8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gitlab:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/wrench", "healthcheck", "http://127.0.0.1:8080/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  backup:
+    build: *wrench-build
+    command: ["run", "backup"]
+    environment:
+      WRENCH_BACKUP_POSTGRES_DSN: postgres://wrench_backup:drill-backup@postgres:5432/wrench?sslmode=disable
+      WRENCH_BACKUP_SCHEDULE: "0 2 * * *"
+      WRENCH_BACKUP_RETENTION: 30d
+      WRENCH_BACKUP_RESTIC_PASSWORD: drill-restic-passphrase
+      WRENCH_BACKUP_S3_ENDPOINT: http://s3:8333
+      WRENCH_BACKUP_S3_BUCKET: wrench-backups
+      WRENCH_BACKUP_S3_PATH: drill
+      WRENCH_BACKUP_S3_REGION: us-east-1
+      WRENCH_BACKUP_S3_ACCESS_KEY: drill
+      WRENCH_BACKUP_S3_SECRET_KEY: drill
+    volumes:
+      - ../../deploy/shared/config/config.yaml:/etc/wrench/config.yaml:ro
+      - backup_repo:/var/lib/wrench-backup/restic
+      - backup_status:/var/lib/wrench-backup/status
+    depends_on:
+      postgres:
+        condition: service_healthy
+      s3:
+        condition: service_healthy
+
+volumes:
+  s3data:
+  pgdata:
+  backup_repo:
+  backup_status:

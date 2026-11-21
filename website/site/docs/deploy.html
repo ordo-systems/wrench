@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Deploy — Wrench docs</title>
+    <link rel="icon" type="image/svg+xml" href="../favicon.svg" />
+    <link rel="stylesheet" href="../assets/site.css" />
+    <script src="../assets/theme.js"></script>
+  </head>
+  <body>
+    <header class="bar">
+      <a class="brand" href="../">
+        <svg class="logo" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><path d="M14.6 4.5A4.5 4.5 0 1 0 19.5 9.4M11.8 12.2 4.5 19.5" /></svg>Wrench
+      </a>
+      <nav aria-label="Site">
+        <a href="./" aria-current="page">Docs</a>
+        <a href="https://github.com/ordo-systems/wrench">GitHub</a>
+      </nav>
+      <button type="button" class="icon" data-theme-toggle aria-label="Switch theme">
+        <svg class="sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2m-7.07-17.07 1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" /></svg>
+        <svg class="moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" /></svg>
+      </button>
+    </header>
+    <div class="docs">
+      <aside>
+        <nav aria-label="Documentation">
+          <a href="./">Quick start</a>
+          <a href="deploy.html" aria-current="page">Deploy</a>
+          <a href="configure.html">Configure</a>
+          <a href="connect.html">Connect opencode</a>
+          <a href="operate.html">Operate</a>
+        </nav>
+      </aside>
+      <article>
+        <h1>Deploy</h1>
+        <p class="lead">One node runs four containers from published images: Caddy with HTTPS, Wrench, PostgreSQL and backup. Only Caddy publishes ports.</p>
+
+        <h2>You need</h2>
+        <ul>
+          <li>A Linux host with Docker Compose, a DNS name pointing at it, ports 80 and 443 open.</li>
+          <li>A GitLab application: confidential, scopes <code>openid profile email</code>, callback <code>https://&lt;domain&gt;/auth/gitlab/callback</code>.</li>
+          <li>A GitLab token with <code>read_api</code> for account checks.</li>
+          <li>An OpenRouter key with a credit limit.</li>
+          <li>An S3 bucket for backups.</li>
+        </ul>
+
+        <h2>Files</h2>
+        <pre><code>/opt/wrench/
+├── compose.yaml
+├── .env                    # secrets
+├── Caddyfile
+├── initdb/10-backup-role.sh
+├── config/config.yaml      # policy, see Configure
+└── data/                   # all state: database, certificates, local backups
+    ├── postgres/
+    ├── caddy/
+    └── backup/</code></pre>
+        <p>
+          Everything Wrench keeps is in <code>data/</code> on the host, so it is plain files you can see, move and
+          include in host-level backups. Copy the restic password and S3 keys from <code>.env</code> somewhere off
+          the node: a restore needs them.
+        </p>
+
+        <h2>compose.yaml</h2>
+        <p>Each container gets only its own secrets: the OpenRouter key reaches Wrench only, the S3 keys reach backup only.</p>
+        <pre><code># Wrench on one node: Caddy (HTTPS), Wrench, PostgreSQL and backup.
+# Secrets come from .env next to this file, policy from config/, state lives in data/.
+name: wrench
+
+services:
+  caddy:
+    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    restart: unless-stopped
+    environment:
+      WRENCH_DOMAIN: ${WRENCH_DOMAIN:?}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/caddy/data:/data
+      - ./data/caddy/config:/config
+    networks: [edge]
+    depends_on:
+      wrench:
+        condition: service_healthy
+
+  wrench:
+    image: ghcr.io/ordo-systems/wrench:${WRENCH_VERSION:?}
+    restart: unless-stopped
+    environment:
+      WRENCH_LISTEN_ADDR: 0.0.0.0:8080
+      WRENCH_PUBLIC_URL: https://${WRENCH_DOMAIN:?}
+      WRENCH_WEB_SESSION_TTL: 12h
+      WRENCH_CLIENT_KEYS_TTL: 168h
+      WRENCH_POSTGRES_DSN: postgres://wrench:${POSTGRES_PASSWORD:?}@postgres:5432/wrench?sslmode=disable
+      WRENCH_GITLAB_URL: ${WRENCH_GITLAB_URL:?}
+      WRENCH_GITLAB_CLIENT_ID: ${WRENCH_GITLAB_CLIENT_ID:?}
+      WRENCH_GITLAB_CLIENT_SECRET: ${WRENCH_GITLAB_CLIENT_SECRET:?}
+      WRENCH_GITLAB_SYNC_TOKEN: ${WRENCH_GITLAB_SYNC_TOKEN:?}
+      WRENCH_GITLAB_SYNC_INTERVAL: 5m
+      WRENCH_OPENROUTER_KEY: ${WRENCH_OPENROUTER_KEY:?}
+      WRENCH_UPSTREAM_TIMEOUT_CONNECT: 10s
+      WRENCH_UPSTREAM_TIMEOUT_FIRST_TOKEN: 90s
+      WRENCH_UPSTREAM_TIMEOUT_STREAM_IDLE: 90s
+      WRENCH_UPSTREAM_TIMEOUT_TOTAL: 10m
+      WRENCH_UPSTREAM_CONCURRENCY_PER_USER: 3
+      WRENCH_UPSTREAM_CONCURRENCY_GLOBAL: 60
+      WRENCH_SESSION_OFFLINE_AFTER: 60s
+      WRENCH_ALERT_WEBHOOK_URL: ${WRENCH_ALERT_WEBHOOK_URL:-}
+      WRENCH_BACKUP_STATUS_FILE: /var/lib/wrench/backup-status/backup.json
+    volumes:
+      - ./config:/etc/wrench:ro
+      - ./data/backup/status:/var/lib/wrench/backup-status:ro
+    networks: [edge, backend]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/wrench", "healthcheck", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  postgres:
+    image: postgres:17-alpine@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: wrench
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: wrench
+      WRENCH_BACKUP_DB_PASSWORD: ${WRENCH_BACKUP_DB_PASSWORD:?}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wrench -d wrench"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  backup:
+    image: ghcr.io/ordo-systems/wrench:${WRENCH_VERSION:?}
+    command: ["run", "backup"]
+    restart: unless-stopped
+    environment:
+      WRENCH_BACKUP_POSTGRES_DSN: postgres://wrench_backup:${WRENCH_BACKUP_DB_PASSWORD:?}@postgres:5432/wrench?sslmode=disable
+      WRENCH_BACKUP_SCHEDULE: "0 2 * * *"
+      WRENCH_BACKUP_RETENTION: 30d
+      WRENCH_BACKUP_RESTIC_PASSWORD: ${WRENCH_BACKUP_RESTIC_PASSWORD:?}
+      WRENCH_BACKUP_S3_ENDPOINT: ${WRENCH_BACKUP_S3_ENDPOINT:?}
+      WRENCH_BACKUP_S3_BUCKET: ${WRENCH_BACKUP_S3_BUCKET:?}
+      WRENCH_BACKUP_S3_PATH: wrench
+      WRENCH_BACKUP_S3_REGION: ${WRENCH_BACKUP_S3_REGION:?}
+      WRENCH_BACKUP_S3_ACCESS_KEY: ${WRENCH_BACKUP_S3_ACCESS_KEY:?}
+      WRENCH_BACKUP_S3_SECRET_KEY: ${WRENCH_BACKUP_S3_SECRET_KEY:?}
+      WRENCH_BACKUP_HEARTBEAT_URL: ${WRENCH_BACKUP_HEARTBEAT_URL:-}
+    volumes:
+      - ./config:/etc/wrench:ro
+      - ./data/backup/restic:/var/lib/wrench-backup/restic
+      - ./data/backup/status:/var/lib/wrench-backup/status
+    networks: [backend, egress]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+# edge reaches the internet (GitLab, OpenRouter, webhook); backend is internal; egress lets backup reach S3.
+networks:
+  edge: {}
+  backend:
+    internal: true
+  egress: {}
+</code></pre>
+
+        <h2>.env</h2>
+        <pre><code>WRENCH_VERSION=1.0.0
+WRENCH_DOMAIN=wrench.example.com
+
+POSTGRES_PASSWORD=change-me-1
+WRENCH_BACKUP_DB_PASSWORD=change-me-2
+
+WRENCH_GITLAB_URL=https://gitlab.example.com
+WRENCH_GITLAB_CLIENT_ID=change-me
+WRENCH_GITLAB_CLIENT_SECRET=change-me
+WRENCH_GITLAB_SYNC_TOKEN=change-me
+
+WRENCH_OPENROUTER_KEY=change-me
+WRENCH_ALERT_WEBHOOK_URL=
+
+WRENCH_BACKUP_RESTIC_PASSWORD=change-me-long-passphrase
+WRENCH_BACKUP_S3_ENDPOINT=https://s3.example.com
+WRENCH_BACKUP_S3_BUCKET=wrench-backups
+WRENCH_BACKUP_S3_REGION=eu-central-1
+WRENCH_BACKUP_S3_ACCESS_KEY=change-me
+WRENCH_BACKUP_S3_SECRET_KEY=change-me
+WRENCH_BACKUP_HEARTBEAT_URL=</code></pre>
+        <p>Use letters and digits for the two database passwords: they are embedded in connection URLs.</p>
+
+        <h2>Caddyfile</h2>
+        <pre><code># Public HTTPS entry point. Caddy obtains and renews the certificate for WRENCH_DOMAIN automatically;
+# ports 80 and 443 must reach this host. Responses are streamed unbuffered for server-sent events,
+# and nothing is compressed so streams are never held back.
+{$WRENCH_DOMAIN} {
+	reverse_proxy wrench:8080 {
+		flush_interval -1
+	}
+}</code></pre>
+
+        <h2>initdb/10-backup-role.sh</h2>
+        <p>Postgres runs it once, on an empty <code>data/postgres</code>: a read-only role for backups.</p>
+        <pre><code>#!/bin/sh
+# Runs once, when data/postgres is empty: a login role that can only read, used by the backup container.
+set -eu
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" -v pw="$WRENCH_BACKUP_DB_PASSWORD" &lt;&lt;'SQL'
+CREATE ROLE wrench_backup LOGIN PASSWORD :'pw';
+GRANT pg_read_all_data TO wrench_backup;
+SQL</code></pre>
+
+        <h2>config/config.yaml</h2>
+        <p>Start from the <a href="configure.html">example in Configure</a> and list your users.</p>
+
+        <h2 id="start">Start</h2>
+        <pre><code>cd /opt/wrench
+mkdir -p data/postgres data/caddy/data data/caddy/config data/backup/restic data/backup/status
+sudo chown -R 65532:65532 data/backup         # the Wrench image runs as UID 65532
+docker compose up -d
+docker compose exec backup wrench backup     # first backup</code></pre>
+        <p>
+          Open <code>https://&lt;domain&gt;/healthz</code>, sign in to the dashboard, and point an external uptime
+          check at <code>/healthz</code>: a stopped node cannot alert.
+        </p>
+        <p>
+          Images are <code>ghcr.io/ordo-systems/wrench:&lt;version&gt;</code>; <code>edge</code> follows
+          <code>master</code>. Verify one with
+          <code>gh attestation verify oci://ghcr.io/ordo-systems/wrench:&lt;version&gt; --repo ordo-systems/wrench</code>.
+        </p>
+        <nav class="next" aria-label="Pages">
+          <span><a class="button" href="./">← Quick start</a></span>
+          <span><a class="button" href="configure.html">Configure →</a></span>
+        </nav>
+      </article>
+    </div>
+    <footer>
+      Wrench · <a href="https://github.com/ordo-systems/wrench">github.com/ordo-systems/wrench</a> ·
+      <a href="https://github.com/ordo-systems/wrench/tree/master/docs">Full reference</a>
+    </footer>
+  </body>
+</html>

@@ -1,0 +1,1415 @@
+openapi: 3.0.3
+info:
+  title: Wrench API
+  version: "1"
+  description: |
+    The JSON API of a Wrench server, used by the dashboard, coding-agent clients and the test tools. This document is
+    the source of truth: the server routing and the clients' types are generated from it (`make generate`).
+
+    Not described here: `POST /v1/chat/completions` (an OpenAI-compatible inference proxy), the GitLab sign-in and
+    logout routes under `/auth/`, and the dashboard files.
+
+    Every list defaults to the caller's own data. Administrators pass `?user=` with an email for one user or `*` for
+    everyone; other callers get 403 for anyone but themselves.
+    Operations marked `x-wrench-admin: true` are refused to everyone else with 403 before the request is parsed.
+    Amounts are decimal strings in the budget currency (USD), never floating-point numbers. A `null` count or time
+    means "not reported", never zero.
+servers:
+  - url: /
+tags:
+  - name: health
+  - name: identity
+  - name: accounting
+  - name: sessions
+  - name: keys
+  - name: dashboard
+  - name: opencode
+    description: The OpenCode Console contract that a vanilla opencode signs in to and reads its setup from.
+
+paths:
+  /healthz:
+    get:
+      operationId: getHealthz
+      tags: [health]
+      summary: Liveness
+      description: Process liveness only; dependencies are not checked.
+      responses:
+        "200":
+          description: The process is running.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+
+  /readyz:
+    get:
+      operationId: getReadyz
+      tags: [health]
+      summary: Readiness
+      description: PostgreSQL and OpenRouter readiness. OpenRouter's state comes from a cached background probe.
+      responses:
+        "200":
+          description: Every dependency is ready.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Checks" }
+        "503":
+          description: A dependency is unavailable; the body names it.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Checks" }
+
+  /auth/device/code:
+    post:
+      operationId: startDeviceLogin
+      tags: [opencode]
+      summary: Start a device login (RFC 8628) for opencode
+      description: |
+        The user opens `verification_uri_complete`, signs in and approves the code on the dashboard; the client polls
+        `/auth/device/token` every `interval` seconds. Only `client_id: opencode-cli` is accepted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeviceCodeRequest" }
+      responses:
+        "200":
+          description: The code pair.
+          headers:
+            Cache-Control:
+              required: true
+              schema: { type: string, enum: [no-store] }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceCode" }
+        "400":
+          description: "`invalid_client`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceTokenError" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /auth/device/token:
+    post:
+      operationId: deviceToken
+      tags: [opencode]
+      summary: Poll a device login or refresh its key
+      description: |
+        With the device-code grant: `authorization_pending` until the user decides, `slow_down` when polled faster
+        than the interval, `access_denied` when denied (or the user is blocked or not allowed), `expired_token` when
+        expired, unknown or already used. On approval the access token is a new `wrk_` device key. The refresh grant
+        replaces the key and the refresh token; a used, revoked or expired refresh token is `invalid_grant`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeviceTokenRequest" }
+      responses:
+        "200":
+          description: A new device key and refresh token. They are shown once and never stored in clear.
+          headers:
+            Cache-Control:
+              required: true
+              schema: { type: string, enum: [no-store] }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceToken" }
+        "400":
+          description: An RFC 8628 or OAuth error code.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceTokenError" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/device:
+    post:
+      operationId: decideDevice
+      tags: [opencode]
+      summary: Approve or deny a device login
+      description: |
+        Dashboard only: the caller must be signed in with the session cookie (device keys get 403) and have a fresh
+        GitLab status. The code is matched regardless of case, dashes and spaces. An unknown, expired or already
+        decided code is 404.
+      security:
+        - session: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeviceDecision" }
+      responses:
+        "204": { description: Recorded. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/user:
+    get:
+      operationId: getConsoleUser
+      tags: [opencode]
+      summary: The caller as an OpenCode Console account
+      security:
+        - deviceKey: []
+        - session: []
+      responses:
+        "200":
+          description: The account.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConsoleUser" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/orgs:
+    get:
+      operationId: listConsoleOrgs
+      tags: [opencode]
+      summary: The one organization, named by WRENCH_ORG_NAME
+      security:
+        - deviceKey: []
+        - session: []
+      responses:
+        "200":
+          description: The organization.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ConsoleOrg" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v2/config:
+    get:
+      operationId: getConsoleConfig
+      tags: [opencode]
+      summary: The opencode configuration for the caller
+      description: |
+        Provider `wrench` (OpenAI-compatible, `<public URL>/v1`) with the caller's tier models that the upstream catalog
+        lists, and policies that allow no other provider. The `x-opencode-instructions-skills` header tells opencode to
+        load `/api/v2/instructions` and `/api/v2/skills`.
+      security:
+        - deviceKey: []
+        - session: []
+      responses:
+        "200":
+          description: The configuration.
+          headers:
+            x-opencode-instructions-skills:
+              required: true
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConsoleConfig" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v2/instructions:
+    get:
+      operationId: listConsoleInstructions
+      tags: [opencode]
+      summary: Managed instructions (none)
+      security:
+        - deviceKey: []
+        - session: []
+      responses:
+        "200":
+          description: The instructions.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConsoleInstructions" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v2/skills:
+    get:
+      operationId: listConsoleSkills
+      tags: [opencode]
+      summary: Managed skills (none yet)
+      security:
+        - deviceKey: []
+        - session: []
+      responses:
+        "200":
+          description: The skills.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConsoleSkills" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/policies/current-budgets:
+    get:
+      operationId: listConsoleBudgets
+      tags: [opencode]
+      summary: Budget windows as Console budget rules, for opencode's /usage
+      description: |
+        One rule per window: the caller's as `scope: each`, the global ones only for administrators as
+        `scope: combined, shared: true`. Pending costs count as spent, as in admission.
+      security:
+        - deviceKey: []
+        - session: []
+      responses:
+        "200":
+          description: The rules.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ConsoleBudget" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/me:
+    get:
+      operationId: getMe
+      tags: [identity]
+      summary: Caller identity
+      security: &authenticated
+        - deviceKey: []
+        - session: []
+      responses:
+        "200":
+          description: The authenticated caller.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Identity" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/status:
+    get:
+      operationId: getStatus
+      tags: [identity]
+      summary: Whether the caller's inference can run, and the caller's models
+      description: |
+        Every caller may read it. `paused` lists why new requests would be refused; global reasons carry no amounts.
+        A storage failure after the credential was checked still answers 200, with `storage_unavailable` as the only
+        check; when PostgreSQL is down before that, authentication answers 503 like every other route. Each check is
+        bounded, so a hung dependency becomes a reason instead of a hung request.
+      security: *authenticated
+      responses:
+        "200":
+          description: The caller's status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Status" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/models:
+    get:
+      operationId: listModels
+      tags: [identity]
+      summary: Models the caller may select
+      description: The caller's tier models and its default. Only models present in the upstream catalog are listed.
+      security: *authenticated
+      responses:
+        "200":
+          description: The selectable models.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ModelList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/requests:
+    get:
+      operationId: listRequests
+      tags: [accounting]
+      summary: Recent attempts
+      description: Attempts with outcome, timing, tokens and cost, newest first.
+      security: *authenticated
+      parameters:
+        - $ref: "#/components/parameters/User"
+        - $ref: "#/components/parameters/Limit"
+        - name: session
+          in: query
+          description: Only attempts of this session.
+          schema: { type: string }
+      responses:
+        "200":
+          description: Attempts, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [attempts]
+                properties:
+                  attempts:
+                    type: array
+                    items: { $ref: "#/components/schemas/Attempt" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/sessions:
+    get:
+      operationId: listSessions
+      tags: [sessions]
+      summary: Recent sessions
+      description: Sessions with live status, device, client versions and usage totals.
+      security: *authenticated
+      parameters:
+        - $ref: "#/components/parameters/User"
+        - $ref: "#/components/parameters/Limit"
+        - name: status
+          in: query
+          required: false
+          description: Only sessions with this live status.
+          schema: { type: string, enum: [active, offline] }
+      responses:
+        "200":
+          description: Sessions, most recently seen first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessions]
+                properties:
+                  sessions:
+                    type: array
+                    items: { $ref: "#/components/schemas/Session" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/usage:
+    get:
+      operationId: getUsage
+      tags: [accounting]
+      summary: Usage totals for the current window
+      description: Cost sums confirmed attempts; pending ones are counted separately.
+      security: *authenticated
+      parameters:
+        - $ref: "#/components/parameters/User"
+        - name: window
+          in: query
+          required: true
+          description: "`5_hours`, `day`, `week` or `month`."
+          schema: { type: string }
+        - name: group
+          in: query
+          description: "Group by `user`, `session` or `model`; empty for totals only. For `model` the group `key` is the model name."
+          schema: { type: string }
+      responses:
+        "200":
+          description: Totals and groups.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Usage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/keys:
+    get:
+      operationId: listKeys
+      tags: [keys]
+      summary: Device keys
+      description: Key metadata; tokens are never stored, so they cannot leak here.
+      security: *authenticated
+      parameters:
+        - $ref: "#/components/parameters/User"
+      responses:
+        "200":
+          description: Keys.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [keys]
+                properties:
+                  keys:
+                    type: array
+                    items: { $ref: "#/components/schemas/ClientKey" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/keys/{id}:
+    delete:
+      operationId: revokeKey
+      tags: [keys]
+      summary: Revoke a device key
+      description: Non-administrators can only revoke their own keys; other keys look absent.
+      security: *authenticated
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "204": { description: Revoked. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/keys/revoke:
+    post:
+      operationId: revokeKeys
+      tags: [keys]
+      summary: Revoke all active device keys of a user
+      description: |
+        Revokes every active key of the caller, or of the user named by `user` (administrators only). `*` is
+        refused with 400: revoking everyone's keys is not a bulk action of this endpoint. Sessions are untouched.
+      security: *authenticated
+      parameters:
+        - $ref: "#/components/parameters/User"
+      responses:
+        "200":
+          description: The number of keys that were active and are now revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revoked]
+                properties:
+                  revoked: { type: integer, format: int64 }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/users/{email}/revoke:
+    post:
+      operationId: revokeUser
+      x-wrench-admin: true
+      tags: [keys]
+      summary: "Administrators: revoke every key and session of a user"
+      security: *authenticated
+      parameters:
+        - name: email
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The number of revoked keys and sessions.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revoked]
+                properties:
+                  revoked: { type: integer, format: int64 }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/stats:
+    get:
+      operationId: getStats
+      tags: [dashboard]
+      summary: Chart aggregates
+      description: |
+        Aggregates per bucket and in total: confirmed cost, unknown-cost count, outcomes, extra attempts, tokens with
+        the number of attempts reporting them, cache share numerator and denominator, p50/p95 first token and
+        duration and active sessions; breakdowns by user, model and inference provider; the session
+        cost distribution. The period defaults to the 24 hours before the end of the current bucket and spans at
+        most 500 buckets.
+      security: *authenticated
+      parameters:
+        - $ref: "#/components/parameters/User"
+        - name: from
+          in: query
+          description: RFC 3339 start; empty for 24 hours before `to`.
+          schema: { type: string }
+        - name: to
+          in: query
+          description: RFC 3339 end; empty for the end of the current bucket.
+          schema: { type: string }
+        - name: bucket
+          in: query
+          description: "`5m`, `hour` (default) or `day`."
+          schema: { type: string }
+        - name: model
+          in: query
+          schema: { type: string }
+        - name: provider
+          in: query
+          schema: { type: string }
+        - name: session
+          in: query
+          schema: { type: string }
+        - name: group_by
+          in: query
+          description: |
+            `user` adds `stats.series`: the buckets of the eight users with the highest confirmed cost, plus
+            `user: ""` for everyone else when more than eight users had attempts. Administrators only.
+          schema: { type: string, enum: [user] }
+      responses:
+        "200":
+          description: Aggregates.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StatsResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/users:
+    get:
+      operationId: listUsers
+      x-wrench-admin: true
+      tags: [dashboard]
+      summary: The allowlist with access state, limits and spend
+      security: *authenticated
+      responses:
+        "200":
+          description: Users.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [users]
+                properties:
+                  users:
+                    type: array
+                    items: { $ref: "#/components/schemas/UserRow" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/system:
+    get:
+      operationId: getSystem
+      x-wrench-admin: true
+      tags: [dashboard]
+      summary: Readiness, policy, route health and accounting quality
+      description: |
+        When PostgreSQL is unavailable only `checks` and `version` are returned.
+      security: *authenticated
+      responses:
+        "200":
+          description: The system view.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/System" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/alerts:
+    get:
+      operationId: listAlerts
+      x-wrench-admin: true
+      tags: [dashboard]
+      summary: Open and recent alert incidents
+      description: |
+        Open incidents first. `?user=` follows the list scope: by default the caller's own and system-wide
+        incidents, `*` for every user's.
+      security: *authenticated
+      parameters:
+        - $ref: "#/components/parameters/User"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Incidents and whether alerts are configured.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [alerts, enabled]
+                properties:
+                  alerts:
+                    type: array
+                    items: { $ref: "#/components/schemas/Incident" }
+                  enabled: { type: boolean }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/budget:
+    get:
+      operationId: getBudget
+      tags: [accounting]
+      summary: The caller's budget windows
+      description: |
+        The caller's windows, and for administrators the global ones, plus the number of finished attempts whose
+        cost is unknown (requests wait while it is above zero). Administrators may pass `user` to read another
+        user's windows (the global ones stay included); `*` is refused with 400.
+      security: *authenticated
+      parameters:
+        - $ref: "#/components/parameters/User"
+      responses:
+        "200":
+          description: Budget status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BudgetStatus" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/events:
+    get:
+      operationId: streamEvents
+      tags: [dashboard]
+      summary: Server-sent dashboard change events
+      description: |
+        A `text/event-stream` of `event: <topic>` frames (`usage`, `sessions`, `keys`, `users`, `alerts`, `status`,
+        `budget`) with empty data, sent when the caller's data changed; clients re-read through the matching
+        endpoint. Comment lines (`: keep-alive`) keep idle connections open. The stream ends with the request.
+      security: *authenticated
+      responses:
+        "200":
+          description: The event stream.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+components:
+  securitySchemes:
+    deviceKey:
+      type: http
+      scheme: bearer
+      description: A device key issued by the device login (`wrk_...`).
+    session:
+      type: apiKey
+      in: cookie
+      name: wrench_session
+      description: |
+        The dashboard session cookie (`__Host-wrench_session` over HTTPS). Requests other than GET that are
+        authenticated by it must carry the server's public `Origin`.
+
+  parameters:
+    User:
+      name: user
+      in: query
+      description: |
+        Whose data to return: empty or the caller's email for the caller, another email for that user, `*` for
+        everyone. Only administrators may name another user or `*`; other callers get 403.
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      description: 1 to 1000; empty for the default, 100. A string so that an empty value means the default.
+      schema: { type: string }
+
+  responses:
+    BadRequest:
+      description: The request is malformed.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: No valid credential.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: The caller may not do this.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such resource, or the server does not provide this route.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unavailable:
+      description: Storage or authentication is unavailable.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Status:
+      type: object
+      required: [inference, models, version, alerts]
+      properties:
+        inference: { $ref: "#/components/schemas/InferenceStatus" }
+        models:
+          type: array
+          description: The models of the caller's tier that the upstream catalog lists.
+          items: { $ref: "#/components/schemas/CatalogModel" }
+        version: { type: string }
+        alerts:
+          type: array
+          description: |
+            Open critical incidents for the banner. Administrators get every one with its message; other users get
+            only fixed texts without amounts about the upstream, the shared budget and their own
+            budget.
+          items: { $ref: "#/components/schemas/StatusAlert" }
+    StatusAlert:
+      type: object
+      required: [key, severity, message]
+      properties:
+        key: { type: string }
+        severity: { type: string, enum: [critical] }
+        message: { type: string }
+    InferenceStatus:
+      type: object
+      required: [state, reasons]
+      properties:
+        state: { type: string, enum: [ok, paused], description: "`paused` exactly when `reasons` is not empty." }
+        reasons:
+          type: array
+          items: { $ref: "#/components/schemas/PauseReason" }
+    PauseReason:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          enum:
+            - storage_unavailable
+            - upstream_unavailable
+            - global_budget_exhausted
+            - own_budget_exhausted
+            - gitlab_status_unconfirmed
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { $ref: "#/components/schemas/ErrorDetail" }
+    ErrorDetail:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string }
+        type:
+          type: string
+          description: Error class, as in OpenAI errors (`authentication_error`, `wrench_error`).
+        code:
+          type: string
+          description: Machine-readable reason, such as `budget_exhausted` or `concurrency_limit`.
+
+    Amount:
+      type: string
+      description: A decimal amount in the budget currency, such as `0.0012`.
+    Window:
+      type: string
+      enum: [5_hours, day, week, month]
+    Role:
+      type: string
+      enum: [user, admin]
+    Limits:
+      type: object
+      description: A limit per window.
+      required: [5_hours, day, week, month]
+      properties:
+        5_hours: { $ref: "#/components/schemas/Amount" }
+        day: { $ref: "#/components/schemas/Amount" }
+        week: { $ref: "#/components/schemas/Amount" }
+        month: { $ref: "#/components/schemas/Amount" }
+
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [ok] }
+    Checks:
+      type: object
+      description: Dependency name (`postgres`, `openrouter`) to `ok` or `unavailable`.
+      additionalProperties: { type: string }
+
+    DeviceCodeRequest:
+      type: object
+      required: [client_id]
+      properties:
+        client_id: { type: string }
+        supports_org_scope: { type: boolean }
+    DeviceCode:
+      type: object
+      required: [device_code, user_code, verification_uri_complete, expires_in, interval]
+      properties:
+        device_code: { type: string }
+        user_code: { type: string, description: "`XXXX-XXXX`; case, dashes and spaces do not matter when typed." }
+        verification_uri_complete: { type: string }
+        expires_in: { type: integer }
+        interval: { type: integer }
+    DeviceTokenRequest:
+      type: object
+      required: [grant_type, client_id]
+      properties:
+        grant_type: { type: string, description: "`urn:ietf:params:oauth:grant-type:device_code` or `refresh_token`." }
+        client_id: { type: string }
+        device_code: { type: string }
+        refresh_token: { type: string }
+    DeviceToken:
+      type: object
+      required: [access_token, refresh_token, expires_in, org_id]
+      properties:
+        access_token: { type: string, description: A `wrk_` device key. }
+        refresh_token: { type: string }
+        expires_in: { type: integer, description: Seconds the key is valid. }
+        org_id: { type: string }
+    ConsoleUser:
+      type: object
+      required: [id, email]
+      properties:
+        id: { type: string, description: The Wrench user id. }
+        email: { type: string }
+    ConsoleOrg:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string }
+        name: { type: string }
+    ConsoleModelLimit:
+      type: object
+      required: [context, output]
+      properties:
+        context: { type: integer }
+        output: { type: integer }
+    ConsoleModel:
+      type: object
+      required: [name, limit]
+      properties:
+        name: { type: string }
+        limit: { $ref: "#/components/schemas/ConsoleModelLimit" }
+    ConsoleProviderSettings:
+      type: object
+      required: [baseURL]
+      properties:
+        baseURL: { type: string }
+    ConsoleProvider:
+      type: object
+      required: [name, package, settings, models]
+      properties:
+        name: { type: string }
+        package: { type: string }
+        settings: { $ref: "#/components/schemas/ConsoleProviderSettings" }
+        models:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/ConsoleModel" }
+    ConsolePolicy:
+      type: object
+      required: [action, resource, effect]
+      properties:
+        action: { type: string }
+        resource: { type: string }
+        effect: { type: string, enum: [allow, deny] }
+    ConsoleConfig:
+      type: object
+      required: [providers, policies]
+      properties:
+        providers:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/ConsoleProvider" }
+        policies:
+          type: array
+          items: { $ref: "#/components/schemas/ConsolePolicy" }
+    ConsoleInstruction:
+      type: object
+      required: [id, content]
+      properties:
+        id: { type: string }
+        content: { type: string }
+    ConsoleInstructions:
+      type: object
+      required: [instructions]
+      properties:
+        instructions:
+          type: array
+          items: { $ref: "#/components/schemas/ConsoleInstruction" }
+    ConsoleSkill:
+      type: object
+      required: [slug, version]
+      properties:
+        slug: { type: string }
+        version: { type: string }
+    ConsoleSkills:
+      type: object
+      required: [skills]
+      properties:
+        skills:
+          type: array
+          items: { $ref: "#/components/schemas/ConsoleSkill" }
+    ConsoleBudgetModel:
+      type: object
+      required: [providerID, modelID, name]
+      properties:
+        providerID: { type: string }
+        modelID: { type: string }
+        name: { type: string }
+        spentDollars: { type: number, format: double }
+    ConsoleVendor:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string }
+        name: { type: string }
+    ConsoleBudget:
+      type: object
+      required: [ruleID, limitDollars, spentDollars, scope, per, coverage, models, vendors, picked, shared, resetsAt]
+      properties:
+        ruleID: { type: string, description: "`user-<window>` or `global-<window>`." }
+        limitDollars: { type: number, format: double }
+        spentDollars: { type: number, format: double }
+        scope: { type: string, enum: [each, combined] }
+        per: { type: string, enum: [set, model] }
+        coverage: { type: string, enum: [all, models] }
+        models:
+          type: array
+          items: { $ref: "#/components/schemas/ConsoleBudgetModel" }
+        vendors:
+          type: array
+          items: { $ref: "#/components/schemas/ConsoleVendor" }
+        picked: { type: boolean }
+        shared: { type: boolean }
+        resetsAt: { type: string, format: date-time }
+    DeviceDecision:
+      type: object
+      required: [user_code, decision]
+      properties:
+        user_code: { type: string }
+        decision: { type: string, enum: [approve, deny] }
+    DeviceTokenError:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+    Identity:
+      type: object
+      required: [email, role, credential, status_fresh]
+      properties:
+        email: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        credential: { type: string, enum: [key, session] }
+        status_fresh:
+          type: boolean
+          description: The GitLab account state was confirmed recently enough for inference.
+
+    CatalogModel:
+      type: object
+      required: [name, input_token_limit, max_output_tokens, reasoning, price_input_per_mtok, price_output_per_mtok]
+      properties:
+        name: { type: string }
+        input_token_limit: { type: integer }
+        max_output_tokens: { type: integer }
+        reasoning: { type: boolean }
+        price_input_per_mtok:
+          allOf: [{ $ref: "#/components/schemas/Amount" }]
+          nullable: true
+          description: Dollars per one million input tokens; `null` when the catalog has no price.
+        price_output_per_mtok:
+          allOf: [{ $ref: "#/components/schemas/Amount" }]
+          nullable: true
+          description: Dollars per one million output tokens; `null` when the catalog has no price.
+    ModelList:
+      type: object
+      required: [models]
+      properties:
+        models:
+          type: array
+          items: { $ref: "#/components/schemas/CatalogModel" }
+        default:
+          type: string
+          description: The tier's default model.
+
+    Tokens:
+      type: object
+      required: [input, output, reasoning, cache_read, cache_write]
+      properties:
+        input: { type: integer, format: int64, nullable: true }
+        output: { type: integer, format: int64, nullable: true }
+        reasoning: { type: integer, format: int64, nullable: true }
+        cache_read: { type: integer, format: int64, nullable: true }
+        cache_write: { type: integer, format: int64, nullable: true }
+    Attempt:
+      type: object
+      required:
+        [id, request_id, user_email, session_id, requested_model, upstream_model, provider,
+         inference_provider, generation_id, started_at, first_token_at, finished_at, outcome, error_reason, tokens,
+         cost, cost_state]
+      properties:
+        id: { type: string }
+        request_id: { type: string }
+        user_email: { type: string }
+        session_id: { type: string }
+        requested_model: { type: string }
+        upstream_model: { type: string }
+        provider: { type: string }
+        inference_provider: { type: string }
+        generation_id: { type: string }
+        started_at: { type: string, format: date-time }
+        first_token_at: { type: string, format: date-time, nullable: true }
+        finished_at: { type: string, format: date-time, nullable: true }
+        outcome:
+          type: string
+          description: Empty while the attempt runs.
+          enum: ["", success, error, cancelled]
+        error_reason: { type: string }
+        tokens: { $ref: "#/components/schemas/Tokens" }
+        cost:
+          allOf: [{ $ref: "#/components/schemas/Amount" }]
+          nullable: true
+        cost_state: { type: string, enum: [pending, confirmed] }
+    UsageTotals:
+      type: object
+      required: [tokens, cost, attempts, pending]
+      properties:
+        key:
+          type: string
+          description: The user or session of a group; absent on totals.
+        tokens: { $ref: "#/components/schemas/Tokens" }
+        cost: { $ref: "#/components/schemas/Amount" }
+        attempts: { type: integer, format: int64 }
+        pending: { type: integer, format: int64 }
+    Usage:
+      type: object
+      required: [window, start, end, total, groups]
+      properties:
+        window: { $ref: "#/components/schemas/Window" }
+        start: { type: string, format: date-time }
+        end: { type: string, format: date-time }
+        total: { $ref: "#/components/schemas/UsageTotals" }
+        groups:
+          type: array
+          items: { $ref: "#/components/schemas/UsageTotals" }
+
+    Session:
+      type: object
+      required: [id, user_email, started_at, last_seen_at, device_id, device_name, agent, status, usage]
+      properties:
+        id: { type: string }
+        user_email: { type: string }
+        started_at: { type: string, format: date-time }
+        last_seen_at: { type: string, format: date-time }
+        device_id: { type: string }
+        device_name: { type: string }
+        agent:
+          type: string
+          description: Client product token from the User-Agent header, for example `opencode/2.3.4`; empty when unknown.
+        status:
+          type: string
+          description: "`offline` when no request arrived within the offline timeout; it does not prove the client stopped."
+          enum: [active, offline]
+        usage: { $ref: "#/components/schemas/UsageTotals" }
+    ClientKey:
+      type: object
+      required: [id, user_email, device_id, device_name, created_at, expires_at, last_used_at, revoked_at]
+      properties:
+        id: { type: integer, format: int64 }
+        user_email: { type: string }
+        device_id: { type: string }
+        device_name: { type: string }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time, nullable: true }
+        revoked_at: { type: string, format: date-time, nullable: true }
+
+    Observed:
+      type: object
+      description: A sum over the attempts that reported a field; `sum` is null when none did.
+      required: [sum, reported]
+      properties:
+        sum: { type: integer, format: int64, nullable: true }
+        reported: { type: integer, format: int64 }
+    Latency:
+      type: object
+      required: [observed, p50_ms, p95_ms]
+      properties:
+        observed: { type: integer, format: int64 }
+        p50_ms: { type: number, format: double, nullable: true }
+        p95_ms: { type: number, format: double, nullable: true }
+    StatsBucket:
+      type: object
+      required:
+        [start, attempts, requests, success, errors, cancelled, running, pending, confirmed, cost,
+         input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens, cached_input,
+         cacheable_input, first_token, duration]
+      properties:
+        start: { type: string, format: date-time }
+        attempts: { type: integer, format: int64 }
+        requests: { type: integer, format: int64 }
+        success: { type: integer, format: int64 }
+        errors: { type: integer, format: int64 }
+        cancelled: { type: integer, format: int64 }
+        running: { type: integer, format: int64 }
+        pending: { type: integer, format: int64 }
+        confirmed: { type: integer, format: int64 }
+        cost: { $ref: "#/components/schemas/Amount" }
+        input_tokens: { $ref: "#/components/schemas/Observed" }
+        output_tokens: { $ref: "#/components/schemas/Observed" }
+        reasoning_tokens: { $ref: "#/components/schemas/Observed" }
+        cache_read_tokens: { $ref: "#/components/schemas/Observed" }
+        cache_write_tokens: { $ref: "#/components/schemas/Observed" }
+        cached_input: { type: integer, format: int64 }
+        cacheable_input: { type: integer, format: int64 }
+        first_token: { $ref: "#/components/schemas/Latency" }
+        duration: { $ref: "#/components/schemas/Latency" }
+        active_sessions: { type: integer, format: int64 }
+    Breakdown:
+      type: object
+      required: [key, attempts, pending, cost]
+      properties:
+        key: { type: string }
+        attempts: { type: integer, format: int64 }
+        pending: { type: integer, format: int64 }
+        cost: { $ref: "#/components/schemas/Amount" }
+    SessionCosts:
+      type: object
+      required: [sessions, incomplete, average, p50, p95]
+      properties:
+        sessions: { type: integer, format: int64 }
+        incomplete: { type: integer, format: int64 }
+        average:
+          allOf: [{ $ref: "#/components/schemas/Amount" }]
+          nullable: true
+        p50:
+          allOf: [{ $ref: "#/components/schemas/Amount" }]
+          nullable: true
+        p95:
+          allOf: [{ $ref: "#/components/schemas/Amount" }]
+          nullable: true
+    Stats:
+      type: object
+      required: [buckets, total, by_user, by_model, by_provider, sessions, oldest_pending]
+      properties:
+        buckets:
+          type: array
+          items: { $ref: "#/components/schemas/StatsBucket" }
+        total: { $ref: "#/components/schemas/StatsBucket" }
+        by_user:
+          type: array
+          items: { $ref: "#/components/schemas/Breakdown" }
+        by_model:
+          type: array
+          items: { $ref: "#/components/schemas/Breakdown" }
+        by_provider:
+          type: array
+          items: { $ref: "#/components/schemas/Breakdown" }
+        sessions: { $ref: "#/components/schemas/SessionCosts" }
+        oldest_pending: { type: string, format: date-time, nullable: true }
+        series:
+          type: array
+          description: Present for `group_by=user`.
+          items: { $ref: "#/components/schemas/UserSeries" }
+    UserSeries:
+      type: object
+      required: [user, buckets]
+      properties:
+        user: { type: string, description: "The user's email; empty for the sum of the users outside the top eight." }
+        buckets:
+          type: array
+          description: |
+            One bucket per period bucket. For the empty user, percentiles are null and the cache fields are
+            unreported (no sum, zero cache numerator and denominator).
+          items: { $ref: "#/components/schemas/StatsBucket" }
+    StatsResponse:
+      type: object
+      required: [from, to, bucket_seconds, stats]
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        bucket_seconds: { type: integer }
+        stats: { $ref: "#/components/schemas/Stats" }
+
+    BudgetWindow:
+      type: object
+      required: [scope, window, spent, limit, percent, resets_at, unsettled]
+      properties:
+        scope: { type: string, enum: [user, global] }
+        window: { $ref: "#/components/schemas/Window" }
+        spent: { $ref: "#/components/schemas/Amount" }
+        limit: { $ref: "#/components/schemas/Amount" }
+        percent: { type: integer }
+        resets_at: { type: string, format: date-time }
+        threshold:
+          type: integer
+          description: The highest `warn_at_percent` threshold reached; absent below every threshold.
+        unsettled:
+          type: integer
+          format: int64
+          description: >
+            Finished attempts of this scope that started in this window and whose cost is still unknown;
+            their cost is not in `spent` yet.
+    BudgetStatus:
+      type: object
+      required: [windows, warn_at_percent]
+      properties:
+        windows:
+          type: array
+          items: { $ref: "#/components/schemas/BudgetWindow" }
+        warn_at_percent:
+          type: array
+          description: The configured usage thresholds, ascending.
+          items: { type: integer }
+
+    Incident:
+      type: object
+      required: [id, key, severity, user_email, message, opened_at, last_seen_at, last_notified_at, resolved_at, resolve_notified]
+      properties:
+        id: { type: integer, format: int64 }
+        key: { type: string, description: "The incident's identity, such as `budget:user:<email>:day`." }
+        severity: { type: string, enum: [warning, critical] }
+        user_email: { type: string, description: Empty for system-wide incidents. }
+        message: { type: string }
+        opened_at: { type: string, format: date-time }
+        last_seen_at: { type: string, format: date-time }
+        last_notified_at: { type: string, format: date-time, nullable: true }
+        resolved_at: { type: string, format: date-time, nullable: true }
+        resolve_notified: { type: boolean }
+
+    UserState:
+      type: object
+      required: [email, status, status_checked_at, active_keys, last_key_use_at]
+      properties:
+        email: { type: string }
+        status: { type: string, enum: [pending, active, blocked] }
+        status_checked_at: { type: string, format: date-time, nullable: true }
+        active_keys: { type: integer, format: int64 }
+        last_key_use_at: { type: string, format: date-time, nullable: true }
+    UserRow:
+      type: object
+      required: [email, role, tier, limits, state, usage]
+      properties:
+        email: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        tier: { type: string }
+        limits: { $ref: "#/components/schemas/Limits" }
+        state:
+          allOf: [{ $ref: "#/components/schemas/UserState" }]
+          nullable: true
+          description: Null for users who never signed in.
+        usage:
+          type: array
+          items: { $ref: "#/components/schemas/BudgetWindow" }
+
+    ModelHealth:
+      type: object
+      required: [model, attempts, errors, first_token_p95_ms, last_success_at, last_error_at, last_error_reason]
+      properties:
+        model: { type: string }
+        attempts: { type: integer, format: int64 }
+        errors: { type: integer, format: int64 }
+        first_token_p95_ms: { type: number, format: double, nullable: true }
+        last_success_at: { type: string, format: date-time, nullable: true }
+        last_error_at: { type: string, format: date-time, nullable: true }
+        last_error_reason: { type: string }
+    SystemModel:
+      type: object
+      required: [name, input_token_limit, max_output_tokens, reasoning_effort, health, price_input_per_mtok, price_output_per_mtok]
+      properties:
+        name: { type: string }
+        upstream_id: { type: string }
+        input_token_limit: { type: integer }
+        max_output_tokens: { type: integer }
+        reasoning_effort: { type: string }
+        price_input_per_mtok:
+          allOf: [{ $ref: "#/components/schemas/Amount" }]
+          nullable: true
+          description: Dollars per one million input tokens; `null` when the catalog has no price.
+        price_output_per_mtok:
+          allOf: [{ $ref: "#/components/schemas/Amount" }]
+          nullable: true
+          description: Dollars per one million output tokens; `null` when the catalog has no price.
+        status:
+          type: string
+          description: Catalog availability.
+          enum: [ok, unknown_upstream, no_catalog]
+        health:
+          allOf: [{ $ref: "#/components/schemas/ModelHealth" }]
+          nullable: true
+    TierModel:
+      type: object
+      required: [name, default]
+      properties:
+        name: { type: string }
+        default: { type: boolean }
+    Tier:
+      type: object
+      required: [name, default, budget, models]
+      properties:
+        name: { type: string }
+        default: { type: boolean }
+        budget: { $ref: "#/components/schemas/Limits" }
+        models:
+          type: array
+          items: { $ref: "#/components/schemas/TierModel" }
+    Alerts:
+      type: object
+      description: Alert thresholds. Durations are nanoseconds.
+      required: [window, repeat_after]
+      properties:
+        window: { type: integer, format: int64 }
+        repeat_after: { type: integer, format: int64 }
+        low_balance: { $ref: "#/components/schemas/LowBalanceAlert" }
+        api_errors: { $ref: "#/components/schemas/APIErrorsAlert" }
+        llm_first_token: { $ref: "#/components/schemas/FirstTokenAlert" }
+    LowBalanceAlert:
+      type: object
+      required: [threshold]
+      properties:
+        threshold: { $ref: "#/components/schemas/Amount" }
+    APIErrorsAlert:
+      type: object
+      required: [threshold, min_attempts]
+      properties:
+        threshold: { type: number, format: double, description: Percent of finished requests. }
+        min_attempts: { type: integer }
+    FirstTokenAlert:
+      type: object
+      required: [threshold_p95, min_attempts]
+      properties:
+        threshold_p95: { type: integer, format: int64 }
+        min_attempts: { type: integer }
+    BackupRepository:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean }
+        snapshot: { type: string }
+        error: { type: string }
+    Backup:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [ok, attention, not_configured] }
+        problem: { type: string }
+        last_success_at: { type: string, format: date-time, nullable: true }
+        next_run_at: { type: string, format: date-time }
+        repositories:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/BackupRepository" }
+    ReloadStatus:
+      type: object
+      required: [revision, loaded_at]
+      properties:
+        revision: { type: string }
+        loaded_at: { type: string, format: date-time }
+        error: { type: string, description: The last rejected change. }
+    System:
+      type: object
+      required: [checks, version]
+      properties:
+        checks: { $ref: "#/components/schemas/Checks" }
+        version: { type: string }
+        models:
+          type: array
+          items: { $ref: "#/components/schemas/SystemModel" }
+        health_window: { type: string, enum: [1h] }
+        budgets: { $ref: "#/components/schemas/BudgetPolicy" }
+        alerts:
+          allOf: [{ $ref: "#/components/schemas/Alerts" }]
+          nullable: true
+        backup: { $ref: "#/components/schemas/Backup" }
+        public_url: { type: string, description: The host of the public URL. }
+        configuration:
+          allOf: [{ $ref: "#/components/schemas/ReloadStatus" }]
+          description: The configuration reload status.
+        tiers:
+          type: array
+          items: { $ref: "#/components/schemas/Tier" }
+    BudgetPolicy:
+      type: object
+      required: [warn_at_percent]
+      properties:
+        warn_at_percent:
+          type: array
+          items: { type: integer }
+        global:
+          allOf: [{ $ref: "#/components/schemas/Limits" }]
+          description: The global limits.
