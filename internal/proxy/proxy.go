@@ -151,7 +151,7 @@ func (h *Handler) admit(w http.ResponseWriter, r *http.Request, id auth.Identity
 	if err != nil {
 		return store.Attempt{}, rewritten{}, &requestError{status: http.StatusRequestEntityTooLarge, message: "request body is too large"}
 	}
-	req, err := rewriteRequest(modelAccess{cfg: config.For(r.Context(), h.cfg), catalog: h.catalog, email: id.Email}, body)
+	req, err := rewriteRequest(modelAccess{cfg: config.For(r.Context(), h.cfg), catalog: h.catalog, email: id.Email}, body, ids.session)
 	if err != nil {
 		return store.Attempt{}, rewritten{}, err
 	}

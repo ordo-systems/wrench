@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -285,6 +286,73 @@ func TestRequestIsRewrittenForUpstream(t *testing.T) {
 	a, _ := f.journal.result(t)
 	if a.RequestID != "req-7" {
 		t.Fatalf("request id %q", a.RequestID)
+	}
+}
+
+// Prompt caching needs the client's cache markers and a stable OpenRouter session for sticky provider routing.
+func TestPromptCachingFieldsReachUpstream(t *testing.T) {
+	const req = `{"model":"glm","stream":true,"messages":[{"role":"system","content":[{"type":"text","text":"sys",` +
+		`"cache_control":{"type":"ephemeral"}}]},{"role":"user","content":"hi"}],` +
+		`"cache_control":{"type":"ephemeral","ttl":"1h"},"prompt_cache_key":"pk","prompt_cache_options":{"mode":"explicit"},` +
+		`"session_id":"spoofed"}`
+	f := newFixture(t, env.UpstreamEnv{}, func(w http.ResponseWriter, r *http.Request) { sse(w, streamEvents...) })
+	resp := f.post(context.Background(), t, req, nil)
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	body := <-f.received
+	if body["session_id"] != "session-1" {
+		t.Fatalf("session_id = %v, want the client session", body["session_id"])
+	}
+	if cc, _ := body["cache_control"].(map[string]any); cc["type"] != "ephemeral" || cc["ttl"] != "1h" {
+		t.Fatalf("cache_control = %v", body["cache_control"])
+	}
+	if body["prompt_cache_key"] != "pk" {
+		t.Fatalf("prompt_cache_key = %v", body["prompt_cache_key"])
+	}
+	if opts, _ := body["prompt_cache_options"].(map[string]any); opts["mode"] != "explicit" {
+		t.Fatalf("prompt_cache_options = %v", body["prompt_cache_options"])
+	}
+	msgs, _ := body["messages"].([]any)
+	sys, _ := msgs[0].(map[string]any)
+	part, _ := sys["content"].([]any)[0].(map[string]any)
+	if cc, _ := part["cache_control"].(map[string]any); cc["type"] != "ephemeral" {
+		t.Fatalf("message cache_control = %v", part)
+	}
+}
+
+// Anthropic caches nothing without a breakpoint; other providers cache automatically and may not accept the field.
+func TestAutomaticCacheControl(t *testing.T) {
+	tests := []struct {
+		name     string
+		upstream string
+		client   string
+		want     any
+	}{
+		{"anthropic gets a breakpoint", "anthropic/claude-opus-5.5", "", map[string]any{"type": "ephemeral"}},
+		{"client breakpoint wins", "anthropic/claude-opus-5.5", `{"type":"ephemeral","ttl":"1h"}`,
+			map[string]any{"type": "ephemeral", "ttl": "1h"}},
+		{"automatic caching elsewhere", "z-ai/glm-5.3", "", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := clientRequest{fields: map[string]json.RawMessage{"messages": json.RawMessage(`[]`)},
+				model: config.Model{UpstreamID: tt.upstream}, limits: catalog.Entry{MaxCompletionTokens: 100}}
+			if tt.client != "" {
+				in.fields["cache_control"] = json.RawMessage(tt.client)
+			}
+			raw, err := upstreamBody(in, "s")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var body map[string]any
+			if err := json.Unmarshal(raw, &body); err != nil {
+				t.Fatal(err)
+			}
+			if got := body["cache_control"]; !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("cache_control = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

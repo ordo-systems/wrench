@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/ordo-systems/wrench/internal/catalog"
 	"github.com/ordo-systems/wrench/internal/config"
@@ -17,10 +18,24 @@ type ModelCatalog interface {
 // forwardedKeys is the allowlist of client fields sent upstream. Everything else is dropped,
 // including routing overrides such as api_base, api_key, fallbacks, models and metadata.
 var forwardedKeys = map[string]bool{
-	"messages": true, "tools": true, "tool_choice": true, "parallel_tool_calls": true,
-	"stream": true, "temperature": true, "top_p": true, "stop": true, "seed": true,
-	"response_format": true, "presence_penalty": true, "frequency_penalty": true,
-	"max_tokens": true, "max_completion_tokens": true,
+	"messages":              true,
+	"tools":                 true,
+	"tool_choice":           true,
+	"parallel_tool_calls":   true,
+	"stream":                true,
+	"temperature":           true,
+	"top_p":                 true,
+	"stop":                  true,
+	"seed":                  true,
+	"response_format":       true,
+	"presence_penalty":      true,
+	"frequency_penalty":     true,
+	"max_tokens":            true,
+	"max_completion_tokens": true,
+	// Prompt caching: Anthropic-style automatic breakpoint and OpenAI cache controls.
+	"cache_control":        true,
+	"prompt_cache_key":     true,
+	"prompt_cache_options": true,
 }
 
 // requestError is a client mistake detected before any attempt is recorded.
@@ -53,12 +68,14 @@ type modelAccess struct {
 
 // rewriteRequest maps the client body to the upstream body.
 // Models outside the caller's tier or unavailable upstream are rejected before any attempt is recorded.
-func rewriteRequest(a modelAccess, body []byte) (rewritten, error) {
+// session is the authenticated client session; it becomes OpenRouter's sticky-routing key so a
+// conversation stays on the provider that holds its prompt cache.
+func rewriteRequest(a modelAccess, body []byte, session string) (rewritten, error) {
 	in, err := parseClientRequest(a, body)
 	if err != nil {
 		return rewritten{}, err
 	}
-	out, err := upstreamBody(in.fields, in.model, in.limits.MaxCompletionTokens, in.stream)
+	out, err := upstreamBody(in, session)
 	return rewritten{body: out, model: in.model, stream: in.stream}, err
 }
 
@@ -111,22 +128,28 @@ func resolveModel(a modelAccess, raw json.RawMessage) (config.Model, catalog.Ent
 }
 
 // upstreamBody keeps allowlisted client fields and adds the server-owned routing and limits.
-func upstreamBody(in map[string]json.RawMessage, model config.Model, maxOutputTokens int, stream bool) ([]byte, error) {
+func upstreamBody(in clientRequest, session string) ([]byte, error) {
 	out := map[string]any{}
-	for k, v := range in {
+	for k, v := range in.fields {
 		if forwardedKeys[k] {
 			out[k] = v
 		}
 	}
-	if err := clampOutputTokens(out, maxOutputTokens); err != nil {
+	if err := clampOutputTokens(out, in.limits.MaxCompletionTokens); err != nil {
 		return nil, err
 	}
-	out["model"] = model.UpstreamID
-	if model.ReasoningEffort != "" {
-		out["reasoning_effort"] = model.ReasoningEffort
+	out["model"] = in.model.UpstreamID
+	if in.model.ReasoningEffort != "" {
+		out["reasoning_effort"] = in.model.ReasoningEffort
 	}
-	if stream {
+	if in.stream {
 		out["stream_options"] = map[string]bool{"include_usage": true}
+	}
+	out["session_id"] = session
+	// Anthropic caches only at explicit breakpoints. Other providers cache automatically and,
+	// with require_parameters, could be excluded for an unsupported top-level cache_control.
+	if _, ok := out["cache_control"]; !ok && strings.HasPrefix(in.model.UpstreamID, "anthropic/") {
+		out["cache_control"] = map[string]string{"type": "ephemeral"}
 	}
 	// OpenRouter: report actual cost, keep the chosen provider's parameters, never fall back.
 	out["usage"] = map[string]bool{"include": true}

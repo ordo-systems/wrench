@@ -107,5 +107,10 @@ Amounts are decimal strings in the budget currency, never floating-point numbers
 
 The proxy forwards an allowlist of request fields, applies the catalog model, output ceiling and reasoning effort,
 asks OpenRouter for usage with `allow_fallbacks: false`, and sets zero retries.
+Prompt-cache fields (`cache_control` on messages and at the top level, `prompt_cache_key`, `prompt_cache_options`)
+pass through, and the client session becomes OpenRouter's `session_id` so a conversation sticks to the provider
+that holds its cache; a client-sent `session_id` is ignored. Anthropic models (`anthropic/*`) cache only at
+explicit breakpoints, so Wrench adds a top-level `cache_control: {"type": "ephemeral"}` unless the client sent one.
+Other models rely on the provider's automatic caching.
 It persists a pending attempt before forwarding and relays the response bytes unchanged.
 Missing usage stays null and missing cost stays `pending`. Only the caller's tier models are admitted.

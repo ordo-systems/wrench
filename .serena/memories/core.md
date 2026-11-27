@@ -46,7 +46,8 @@ Product requirements: `docs/specs/coding-agent-platform.md`; per-area designs `d
 - Lists default to the caller (admins too); other users and `?user=*` only for administrators (`httpapi.scopeFor`),
   others get 403. `system`, `users`, `alerts`, user revocation are `x-wrench-admin`.
 - Proxy forwards an allowlist of client fields; adds `usage.include`, `provider.allow_fallbacks=false`,
-  `require_parameters=true`, catalog `max_tokens`/`reasoning_effort`. Response bytes are relayed unchanged.
+  `require_parameters=true`, catalog `max_tokens`/`reasoning_effort`, and `session_id` = client session (sticky
+  routing for prompt caching; cache fields are allowlisted). Response bytes are relayed unchanged.
 - Attempt (pending) is persisted with its start time before forwarding; start time decides the budget windows.
 - Missing usage/cost is null/pending, never zero. Unknown costs never pause inference: they count as zero until
   reconciled and are reported per window (`unsettled`). A failed dial is `not_sent` ($0). Every cost statement goes
